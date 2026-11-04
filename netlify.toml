@@ -1,0 +1,8 @@
+# O site é o próprio index.html (sem etapa de build).
+[build]
+  publish = "."
+
+# Funções do servidor (cofre de memória na nuvem).
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"

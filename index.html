@@ -367,6 +367,7 @@ a:hover{color:#fff;text-shadow:0 0 8px var(--v)}
         <div class="kv"><span>Sinapses</span><b id="sLinks">--</b></div>
         <div class="kv"><span>Sessão</span><b id="sUp">00:00:00</b></div>
         <div class="kv"><span>Avisos</span><b id="sWarn">--</b></div>
+        <div class="kv"><span>Nuvem</span><b id="sCloud">--</b></div>
         <div class="kv"><span>Versão</span><b id="sVer">--</b></div>
       </section>
     </div>
@@ -404,7 +405,7 @@ const API_KEY = "";
 const KEY_STORE = "alfred.apikey";
 const getKey = () => API_KEY || (()=>{try{return localStorage.getItem(KEY_STORE)||""}catch(e){return ""}})();
 const setKey = k => { try{ k?localStorage.setItem(KEY_STORE,k):localStorage.removeItem(KEY_STORE) }catch(e){} };
-const APP_VERSION = "1.2";   // aumenta a cada atualização
+const APP_VERSION = "1.3";   // aumenta a cada atualização
 const MODEL = "claude-sonnet-5-5";
 const MODEL_LABEL = "Sonnet 5.5";
 const TZ = "Europe/Paris";
@@ -736,7 +737,7 @@ const Brain = {
     if(saved && Array.isArray(saved.notes) && saved.notes.length){this.notes=saved.notes;this.links=saved.links||[]}
     else{this.notes=SEED_NOTES.map(n=>({...n}));this.links=SEED_LINKS.map(l=>[...l])}
   },
-  save(){store.set(this.KEY,{v:1,notes:this.notes,links:this.links})},
+  save(){store.set(this.KEY,{v:1,notes:this.notes,links:this.links}); if(window.Cloud) Cloud.push()},
   add(cat,text){
     cat = CATEGORIES.some(c=>c.id===cat) ? cat : "memorias";
     text = text.trim().replace(/\s+/g," ");
@@ -1292,10 +1293,11 @@ async function handleCommand(text){
 
 /* ════════════════════ CÉREBRO (API do Claude) ════════════════════ */
 const HIST_KEY="alfred.history.v1";
-let history=(()=>{ const h=store.get(HIST_KEY,null); if(!h||!Array.isArray(h.msgs)) return [];
-  if(Date.now()-(h.at||0)>36*3600*1000) return [];                       // depois de 36 h sem falar, começa conversa nova
-  const m=h.msgs; return (m.length&&m[0].role==="user"&&m[m.length-1].role==="assistant")?m:[] })();
-function saveHistory(){ try{ store.set(HIST_KEY,{at:Date.now(),msgs:history}) }catch(e){} }
+function historyFrom(h){ if(!h||!Array.isArray(h.msgs)) return [];
+  if(Date.now()-(h.at||0)>36*3600*1000) return [];                       // depois de 36 h sem falar, começa conversa nova (as memórias ficam)
+  const m=h.msgs; return (m.length&&m[0].role==="user"&&m[m.length-1].role==="assistant")?m:[] }
+let history=historyFrom(store.get(HIST_KEY,null));
+function saveHistory(){ try{ store.set(HIST_KEY,{at:Date.now(),msgs:history}) }catch(e){} if(window.Cloud) Cloud.push() }
 let useExtras=true; let inFlight=false; let turnCtrl=null, turnSuperseded=false;
 function supersede(){ turnSuperseded=true; if(turnCtrl){ try{turnCtrl.abort()}catch(e){} } Voice.stop() }
 function buildSystem(){
@@ -1514,7 +1516,7 @@ async function apiError(res){
 const Contacts = {
   KEY:"alfred.contacts",
   all(){ return store.get(this.KEY,{}) },
-  set(name,phone){ const c=this.all(); c[name.trim()]=phone; store.set(this.KEY,c) },
+  set(name,phone){ const c=this.all(); c[name.trim()]=phone; store.set(this.KEY,c); if(window.Cloud) Cloud.push() },
   find(q){ const c=this.all(), n=norm(q).trim(); if(!n) return null;
     const ks=Object.keys(c);
     const hit=ks.find(k=>norm(k)===n) || ks.find(k=>norm(k).split(/\s+/)[0]===n.split(/\s+/)[0]) || ks.find(k=>norm(k).includes(n)||n.includes(norm(k)));
@@ -1561,13 +1563,14 @@ function showActionCard(url,label,icon,target="_blank"){
 const Timers = {
   KEY:"alfred.timers",
   list(){ return store.get(this.KEY,[]) },
-  add(at,text,kind){ const l=this.list(); l.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),at,text,kind}); l.sort((a,b)=>a.at-b.at); store.set(this.KEY,l); this.render() },
-  clear(){ store.set(this.KEY,[]); this.render() },
+  add(at,text,kind){ const l=this.list(); l.push({id:Date.now().toString(36)+Math.random().toString(36).slice(2,5),at,text,kind}); l.sort((a,b)=>a.at-b.at); store.set(this.KEY,l); this.touched(); this.render() },
+  touched(){ store.set("alfred.timers.at",Date.now()); if(window.Cloud) Cloud.push() },
+  clear(){ store.set(this.KEY,[]); this.touched(); this.render() },
   check(){
     if(!booted) return;
     const now=Date.now(), l=this.list(), due=l.filter(t=>t.at<=now); if(!due.length) return;
     if(state==="processing"||state==="speaking") return;
-    store.set(this.KEY,l.filter(t=>t.at>now)); this.render();
+    store.set(this.KEY,l.filter(t=>t.at>now)); this.touched(); this.render();
     const late=now-due[0].at>120000;
     const txt=due.map(t=>t.kind==="timer"?`o timer${t.text?" de "+t.text:""} terminou`:`lembrete${late?" que ficou pendente":""}: ${t.text}`).join(". E ");
     for(let i=0;i<3;i++) setTimeout(()=>sfx(1046,.18,"triangle",.05),i*260);
@@ -1699,6 +1702,64 @@ async function runTool(name,inp){
   return "ERRO: ferramenta desconhecida.";
 }
 
+/* ════════════════════ MEMÓRIA NA NUVEM ════════════════════ */
+// Guarda tudo (Second Brain, conversa, contatos, lembretes) no cofre do Netlify,
+// para o Alfred lembrar em qualquer navegador ou aparelho que use a mesma chave do Claude.
+async function sha256hex(t){ const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(t)); return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,"0")).join("") }
+var Cloud = {
+  id:null, ready:false, st:"local", t:null, warned:false, announced:false, busy:false,
+  label(){ const el=$("#sCloud"); if(el) el.textContent={local:"Só neste aparelho",sync:"Sincronizando…",ok:"Sincronizada ✓",off:"Indisponível"}[this.st]||"--" },
+  set(st){ this.st=st; this.label() },
+  async init(){
+    if(location.protocol==="file:" || !getKey() || !(window.crypto&&crypto.subtle)){ this.set("local"); return }
+    if(this.busy) return; this.busy=true;
+    try{
+      this.id=await sha256hex("alfred-memory:"+getKey());
+      this.set("sync");
+      const r=await fetch("/api/memory",{headers:{"x-alfred-id":this.id},cache:"no-store"});
+      const ct=r.headers.get("content-type")||"";
+      if(!r.ok || !ct.includes("json")) throw new Error(r.ok?"cofre não encontrado":"HTTP "+r.status);
+      const data=await r.json();
+      this.ready=true;
+      if(data) this.merge(data);
+      this.push(true);
+      this.set("ok");
+      if(!this.announced){ this.announced=true; log("SISTEMA","Memória na nuvem conectada. O Alfred lembra de tudo em qualquer aparelho com a mesma chave do Claude.","sys") }
+    }catch(e){
+      this.ready=false; this.set("off");
+      if(!this.warned){ this.warned=true; log("SISTEMA","Memória na nuvem indisponível ("+(e.message||e)+"). Usando a memória deste aparelho por enquanto.","err") }
+    }finally{ this.busy=false }
+  },
+  merge(d){
+    if(d.brain && Array.isArray(d.brain.notes)){
+      const ids=new Set(Brain.notes.map(n=>n.id)); let added=0;
+      d.brain.notes.forEach(n=>{ if(n&&n.id&&n.text&&!ids.has(n.id)){ Brain.notes.push(n); ids.add(n.id); added++ } });
+      const lk=new Set(Brain.links.map(l=>l.join("|")));
+      (d.brain.links||[]).forEach(l=>{ if(Array.isArray(l)&&l.length===2&&!lk.has(l.join("|"))){ Brain.links.push(l); lk.add(l.join("|")) } });
+      store.set(Brain.KEY,{v:1,notes:Brain.notes,links:Brain.links});
+      if(added){ graph.build(); buildStatic(); log("MEMÓRIA",`◈ ${added} memória(s) sincronizada(s) da nuvem.`,"mem") }
+    }
+    if(d.contacts && typeof d.contacts==="object") store.set(Contacts.KEY,{...Contacts.all(),...d.contacts});
+    const lh=store.get(HIST_KEY,null);
+    if(d.history && d.history.at && (!lh || d.history.at>(lh.at||0)) && !inFlight){ store.set(HIST_KEY,d.history); history=historyFrom(d.history) }
+    if(Array.isArray(d.timers) && (d.timersAt||0)>store.get("alfred.timers.at",0)){ store.set(Timers.KEY,d.timers); store.set("alfred.timers.at",d.timersAt); Timers.render() }
+  },
+  snapshot(){ return {v:1,at:Date.now(),brain:{notes:Brain.notes,links:Brain.links},contacts:Contacts.all(),
+    history:store.get(HIST_KEY,null),timers:Timers.list(),timersAt:store.get("alfred.timers.at",0)} },
+  push(now){ if(!this.ready) return; clearTimeout(this.t); this.t=setTimeout(()=>this._push(), now?0:1200) },
+  async _push(){
+    if(!this.ready||!this.id) return;
+    try{
+      this.set("sync");
+      const r=await fetch("/api/memory",{method:"PUT",headers:{"x-alfred-id":this.id,"content-type":"application/json"},body:JSON.stringify(this.snapshot())});
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      this.set("ok");
+    }catch(e){ this.set("off"); if(!this.warned){ this.warned=true; log("SISTEMA","Não consegui salvar na nuvem ("+(e.message||e)+"). Ficou salvo neste aparelho; tento de novo na próxima mudança.","err") } }
+  }
+};
+// ao voltar para a aba (ou abrir em outro aparelho), busca o que mudou
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible" && Cloud.ready) Cloud.init() });
+
 /* ════════════════════ AVISOS DA ROTINA ════════════════════ */
 let warnOn=store.get("alfred.warn",true), booted=false;
 function setWarn(v){warnOn=v;store.set("alfred.warn",v);$("#sWarn").textContent=v?"Ativos":"Mudos";$("#bWarn").classList.toggle("off",!v)}
@@ -1818,6 +1879,7 @@ async function boot(){
   if(location.protocol==="file:") log("SISTEMA","Aberto como arquivo: o Chrome pode pedir o microfone a cada abertura. Para ele lembrar para sempre, use o Alfred pelo link do site (Netlify).","sys");
   if(!Ear.supported) log("SISTEMA","Reconhecimento de voz indisponível neste navegador. Use o Google Chrome ou o Microsoft Edge. O campo de texto continua funcionando.","err");
   else if(!Ear.enabled) setState("offline");
+  Cloud.init();
   log("SISTEMA",`A.L.F.R.E.D. online · núcleo ${MODEL_LABEL} · ${Brain.notes.length} memórias carregadas.`,"sys");
   if(!getKey()){ log("SISTEMA","Núcleo cognitivo sem chave: cole a chave (sk-ant-...) na caixa abaixo e aperte Enter.","err"); $("#cmd").placeholder="Cole aqui a sua chave sk-ant-... e aperte Enter para ativar o Alfred"; }
   await sleep(600);
@@ -1847,7 +1909,7 @@ function showKeyBox(){ $("#bootGate").textContent="▸ Ative o núcleo para come
 function submitKey(){
   const k=$("#keyIn").value.trim().replace(/^["']|["']$/g,"");
   if(!/^sk-ant-[A-Za-z0-9_\-]{20,}$/.test(k)){ $("#keyErr").textContent="Essa chave não parece certa. Ela começa com sk-ant- e é bem longa."; return }
-  setKey(k); $("#keyBox").classList.remove("on"); boot();
+  setKey(k); $("#keyBox").classList.remove("on"); boot(); Cloud.init();
   $("#cmd").placeholder="Prefere digitar? Escreva aqui e pressione Enter…";
 }
 $("#keyGo").onclick=e=>{e.stopPropagation();submitKey()};
@@ -1877,7 +1939,7 @@ $("#bKey").onclick=()=>{
   const v=k.trim();
   if(!v){ setKey(""); log("SISTEMA","Chave removida deste navegador.","sys"); return }
   if(!/^sk-ant-/.test(v)){ log("SISTEMA","Essa chave não parece certa (deve começar com sk-ant-).","err"); return }
-  setKey(v); log("SISTEMA","Núcleo cognitivo ativado. Chave guardada só neste navegador.","sys"); speakLocal("Núcleo cognitivo ativado, senhor. Agora sim, estou completo.");
+  setKey(v); Cloud.init(); log("SISTEMA","Núcleo cognitivo ativado. Chave guardada só neste navegador.","sys"); speakLocal("Núcleo cognitivo ativado, senhor. Agora sim, estou completo.");
 };
 document.addEventListener("keydown",e=>{
   if($("#boot")&&!$("#boot").dataset.started&&(e.key==="Enter"||e.key===" ")){e.preventDefault(); if(needKeyGate()) showKeyBox(); else boot(); return}
@@ -1906,7 +1968,7 @@ function tryKeyFromText(v){
     log("SISTEMA","Voz trocada para o Voice ID "+v.trim()+".","sys"); speakLocal("Nova voz instalada, senhor. Espero que esteja à altura."); return true }
   const m=v.replace(/\s+/g,"").match(/sk-ant-[A-Za-z0-9_\-]{20,}/);
   if(!m) return false;
-  setKey(m[0]); $("#cmd").placeholder="Prefere digitar? Escreva aqui e pressione Enter…";
+  setKey(m[0]); $("#cmd").placeholder="Prefere digitar? Escreva aqui e pressione Enter…"; Cloud.init();
   log("SISTEMA","Chave recebida e guardada só neste navegador. Núcleo cognitivo ativado.","sys");
   speakLocal("Chave recebida, senhor. Núcleo cognitivo ativado. Agora sim, estou completo.");
   return true;
