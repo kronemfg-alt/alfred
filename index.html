@@ -367,6 +367,7 @@ a:hover{color:#fff;text-shadow:0 0 8px var(--v)}
         <div class="kv"><span>Sinapses</span><b id="sLinks">--</b></div>
         <div class="kv"><span>Sessão</span><b id="sUp">00:00:00</b></div>
         <div class="kv"><span>Avisos</span><b id="sWarn">--</b></div>
+        <div class="kv"><span>Versão</span><b id="sVer">--</b></div>
       </section>
     </div>
   </aside>
@@ -403,6 +404,7 @@ const API_KEY = "";
 const KEY_STORE = "alfred.apikey";
 const getKey = () => API_KEY || (()=>{try{return localStorage.getItem(KEY_STORE)||""}catch(e){return ""}})();
 const setKey = k => { try{ k?localStorage.setItem(KEY_STORE,k):localStorage.removeItem(KEY_STORE) }catch(e){} };
+const APP_VERSION = "1.1";   // aumenta a cada atualização
 const MODEL = "claude-sonnet-5-5";
 const MODEL_LABEL = "Sonnet 5.5";
 const TZ = "Europe/Paris";
@@ -990,7 +992,7 @@ function buildStatic(){
   // legenda
   $("#legend").innerHTML=CATEGORIES.filter(c=>c.id!=="memorias"||Brain.notes.some(n=>n.cat==="memorias")).map(c=>`<button class="chip" data-c="${c.id}"><i style="background:${c.color};box-shadow:0 0 6px ${c.color}"></i>${c.label}</button>`).join("");
   document.querySelectorAll(".chip").forEach(b=>b.onclick=()=>graph.igniteCat(b.dataset.c));
-  $("#cModel").textContent=MODEL_LABEL; $("#sCore").textContent=MODEL_LABEL;
+  $("#cModel").textContent=MODEL_LABEL; $("#sCore").textContent=MODEL_LABEL; $("#sVer").textContent=APP_VERSION;
 }
 const t0=Date.now();
 function tick(){
