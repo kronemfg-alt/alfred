@@ -404,7 +404,7 @@ const API_KEY = "";
 const KEY_STORE = "alfred.apikey";
 const getKey = () => API_KEY || (()=>{try{return localStorage.getItem(KEY_STORE)||""}catch(e){return ""}})();
 const setKey = k => { try{ k?localStorage.setItem(KEY_STORE,k):localStorage.removeItem(KEY_STORE) }catch(e){} };
-const APP_VERSION = "1.1";   // aumenta a cada atualização
+const APP_VERSION = "1.2";   // aumenta a cada atualização
 const MODEL = "claude-sonnet-5-5";
 const MODEL_LABEL = "Sonnet 5.5";
 const TZ = "Europe/Paris";
@@ -1291,7 +1291,12 @@ async function handleCommand(text){
 }
 
 /* ════════════════════ CÉREBRO (API do Claude) ════════════════════ */
-let history=[]; let useExtras=true; let inFlight=false; let turnCtrl=null, turnSuperseded=false;
+const HIST_KEY="alfred.history.v1";
+let history=(()=>{ const h=store.get(HIST_KEY,null); if(!h||!Array.isArray(h.msgs)) return [];
+  if(Date.now()-(h.at||0)>36*3600*1000) return [];                       // depois de 36 h sem falar, começa conversa nova
+  const m=h.msgs; return (m.length&&m[0].role==="user"&&m[m.length-1].role==="assistant")?m:[] })();
+function saveHistory(){ try{ store.set(HIST_KEY,{at:Date.now(),msgs:history}) }catch(e){} }
+let useExtras=true; let inFlight=false; let turnCtrl=null, turnSuperseded=false;
 function supersede(){ turnSuperseded=true; if(turnCtrl){ try{turnCtrl.abort()}catch(e){} } Voice.stop() }
 function buildSystem(){
   const rot=ROUTINE.map(b=>`- ${b.s}–${b.e}: ${b.t} (${b.d})`).join("\n");
@@ -1329,11 +1334,11 @@ Você pode AGIR pelo senhor com as ferramentas: WhatsApp, Google Agenda, Gmail, 
 CONTATOS SALVOS
 ${Contacts.toPrompt()}
 
-MEMÓRIA (Second Brain)
-Quando ele pedir para lembrar/anotar/guardar algo, OU contar um fato novo e duradouro importante sobre a vida dele (pessoa, meta, preferência, data, projeto, decisão), grave adicionando NO FINAL da resposta, em linha própria, exatamente:
-[[MEMORIA|categoria|nota curta e autoexplicativa em terceira pessoa]]
-Categorias válidas: identidade, negocios, financas, sonhos, saude, pessoas, mente, rotina, interesses, memorias.
-Pode haver mais de uma linha dessas. Confirme de forma breve ("Anotado, senhor."). Nunca leia nem mencione esse formato.
+MEMÓRIA (Second Brain) — MUITO IMPORTANTE
+Você é a memória do senhor. Ele se frustra quando você esquece algo que ele já contou.
+- Use a ferramenta memoria_salvar SEMPRE que ele pedir para lembrar/anotar algo, e TAMBÉM por conta própria sempre que ele mencionar qualquer informação nova e duradoura sobre a vida dele (pessoas, datas, metas, planos, decisões, preferências, gostos, projetos, clientes, valores, compromissos). Na dúvida, salve.
+- Pode salvar várias memórias na mesma resposta. Salve sem pedir permissão e confirme de forma breve ("Anotado, senhor.") só quando ele pediu explicitamente; nos outros casos, apenas siga a conversa.
+- Antes de responder, consulte o Second Brain abaixo e use o que já sabe. Nunca pergunte algo que já está lá.
 
 PROTOCOLO DIÁRIO DO SENHOR (rotina nova, em implantação — apenas lembre, não cobre)
 ${rot}
@@ -1362,7 +1367,7 @@ async function _ask(userText){
     return;
   }
   // a conversa só cresce (nunca editamos o passado); quando fica longa, começa uma nova
-  if(history.length>40) history=[];
+  if(history.length>60){ history=[]; saveHistory() }
   const histLen=history.length;
   history.push({role:"user",content:`${contextStamp()}\n${userText}`});
 
@@ -1405,6 +1410,7 @@ async function _ask(userText){
       if(stopReason==="refusal" && !allText){ allText="Receio que esse assunto esteja fora do meu alcance, senhor."; Voice.enqueue(allText) }
       if(!allText){ allText="Perdão, senhor. Meu núcleo ficou em silêncio por um instante. Pode repetir?"; Voice.enqueue(allText) }
       history.push({role:"assistant",content:content.length?content:[{type:"text",text:allText}]});
+      saveHistory();
       break;
     }
   }catch(err){
@@ -1623,6 +1629,12 @@ const TOOLS = [
      quando:{type:"string",description:"Data e hora no horário de Paris, formato AAAA-MM-DDTHH:MM"},
      texto:{type:"string",description:"O que lembrar"}},
      required:["quando","texto"]}},
+  {name:"memoria_salvar",
+   description:"Grava uma memória PERMANENTE no Second Brain do senhor (fica salva mesmo fechando o Alfred). Use sempre que ele pedir para lembrar/anotar algo e SEMPRE que ele contar algo novo e duradouro sobre a vida dele: pessoas e relações, datas, metas, planos, decisões, preferências, gostos, projetos, clientes, números do negócio, saúde, compromissos, sentimentos importantes. Na dúvida, salve. Não salve o que já está no Second Brain.",
+   input_schema:{type:"object",properties:{
+     categoria:{type:"string",enum:["identidade","negocios","financas","sonhos","saude","pessoas","mente","rotina","interesses","memorias"]},
+     nota:{type:"string",description:"Nota curta e autoexplicativa em terceira pessoa, com data se for relevante (ex.: 'Fechou contrato com a loja X em 05/11/2026 por €2.000/mês.')"}},
+     required:["categoria","nota"]}},
   {name:"timers_cancelar",
    description:"Cancela todos os timers e lembretes ativos.",
    input_schema:{type:"object",properties:{}}}
@@ -1675,6 +1687,12 @@ async function runTool(name,inp){
       const at=parisToEpoch(inp.quando); if(isNaN(at)) return "ERRO: data/hora inválida. Use AAAA-MM-DDTHH:MM.";
       if(at<Date.now()-60000) return "ERRO: esse horário já passou. Confirme a data com o senhor.";
       Timers.add(at,inp.texto,"lembrete"); return `Lembrete agendado para ${parisHuman(at)}.`;
+    }
+    case "memoria_salvar":{
+      const note=Brain.add(inp.categoria,inp.nota||""); if(!note) return "ERRO: nota vazia.";
+      graph.build(); buildStatic(); setTimeout(()=>graph.ignite([note.id]),200);
+      log("MEMÓRIA",`◈ ${catById(note.cat).label}: ${note.text}`,"mem");
+      return "Memória gravada no Second Brain.";
     }
     case "timers_cancelar": Timers.clear(); return "Todos os timers e lembretes foram cancelados.";
   }
